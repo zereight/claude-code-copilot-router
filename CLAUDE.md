@@ -1,6 +1,7 @@
 # CLAUDE.md
 
 ## Build/Lint/Test Commands
+
 - Install dependencies: `npm i`
 - Start server: `node index.mjs` (requires OPENAI_API_KEY, OPENAI_BASE_URL, OPENAI_MODEL env vars)
 - Set environment variables:
@@ -12,6 +13,7 @@
   ```
 
 ## Code Style Guidelines
+
 - Follow existing formatting in README.md and other files
 - Use ES module syntax (`import`/`export`)
 - Environment variables are uppercase with underscores
