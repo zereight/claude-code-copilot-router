@@ -2,6 +2,10 @@
 
 > This is a repository for testing routing Claude Code requests to different models.
 
+## ⚠️ Important Notice: Not Suitable for Claude Code Integration
+
+**This project is NOT recommended for use with Claude Code due to high request frequency causing 429 (rate limit) errors.** During POC testing, we found that Claude Code makes numerous rapid requests in short time periods, which consistently triggers rate limiting on most API providers. This makes the integration unreliable and impractical for real-world use.
+
 ![demo.png](https://github.com/musistudio/claude-code-reverse/blob/main/screenshoots/demo.png)
 
 ## Warning! This project is for testing purposes and may consume a lot of tokens! It may also fail to complete tasks!

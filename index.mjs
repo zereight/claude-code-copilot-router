@@ -1,12 +1,14 @@
 import express from 'express';
-import { OpenAI } from 'openai';
 import dotenv from 'dotenv';
 import { existsSync } from 'fs';
 import { writeFile } from 'fs/promises';
 import { Router } from './router.mjs';
-import { getOpenAICommonOptions, sanitizeJson } from './utils.mjs';
+import { sanitizeJson } from './utils.mjs';
+import fetch from 'node-fetch';
+import { TextDecoder } from 'util';
 
 dotenv.config();
+
 const app = express();
 const port = 3456;
 app.use(express.json({ limit: '500mb' }));
@@ -20,15 +22,66 @@ if (process.env.ENABLE_ROUTER && process.env.ENABLE_ROUTER === 'true') {
     }
   };
 } else {
-  const openai = new OpenAI({
-    apiKey: process.env.OPENAI_API_KEY,
-    baseURL: process.env.OPENAI_BASE_URL,
-    ...getOpenAICommonOptions()
-  });
   client = {
-    call: data => {
-      const newData = { ...data, model: process.env.OPENAI_MODEL };
-      return openai.chat.completions.create(newData);
+    call: async data => {
+      console.log('🔎 OpenAI API 호출 파라미터:');
+      console.log(data);
+
+      // OpenRouter에서 지원하지 않는 Claude 모델들을 DeepSeek으로 강제 변경
+      const supportedModel = process.env.OPENAI_MODEL || 'google/gemini-2.5-pro-preview';
+      const newData = {
+        ...data,
+        model: supportedModel // 항상 환경변수의 지원되는 모델 사용
+      };
+      console.log('🔎 실제 API 호출 모델:', newData.model);
+      console.log('🔎 원본 요청 모델:', data.model);
+
+      // OpenRouter API에 직접 HTTP 요청 (OpenAI SDK 헤더 문제 해결)
+      const response = await fetch(process.env.OPENAI_BASE_URL + '/chat/completions', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${process.env.OPENAI_API_KEY}`,
+          'HTTP-Referer': 'https://claude-code-copilot-router.local',
+          'X-Title': 'Claude Code Copilot Router'
+        },
+        body: JSON.stringify(newData)
+      });
+
+      if (!response.ok) {
+        const errorText = await response.text();
+        console.error('OpenRouter API 에러:', response.status, errorText);
+        throw new Error(`OpenRouter API 에러: ${response.status} ${errorText}`);
+      }
+
+      // 스트림 응답을 OpenAI SDK 형식으로 변환
+      return {
+        [Symbol.asyncIterator]: async function* () {
+          // Node.js 환경에서는 response.body.getReader()가 동작하지 않으므로, response.body를 직접 처리
+          const decoder = new TextDecoder();
+          let buffer = '';
+
+          for await (const chunk of response.body) {
+            buffer += decoder.decode(chunk, { stream: true });
+            const lines = buffer.split('\n');
+            buffer = lines.pop(); // 마지막 불완전한 줄 유지
+
+            for (const line of lines) {
+              if (line.startsWith('data: ') && line.length > 6) {
+                const data = line.slice(6);
+                if (data === '[DONE]') return;
+
+                try {
+                  const parsed = JSON.parse(data);
+                  yield parsed;
+                } catch (e) {
+                  console.warn('JSON 파싱 에러:', e, 'data:', data);
+                }
+              }
+            }
+          }
+        }
+      };
     }
   };
 }
@@ -44,6 +97,10 @@ app.post('/v1/messages', async (req, res) => {
 
   try {
     let { model, messages, system = [], temperature, tools } = req.body;
+    // map 호출 전 배열 보장
+    messages = Array.isArray(messages) ? messages : [];
+    tools = Array.isArray(tools) ? tools : [];
+    system = Array.isArray(system) ? system : [];
     // 상태 변수 초기화
     completion = undefined;
     currentContentBlocks = [];
@@ -110,10 +167,15 @@ app.post('/v1/messages', async (req, res) => {
             if (schema && typeof schema === 'object' && '$schema' in schema) {
               delete schema['$schema'];
             }
+            // function name 64자 제한, 허용 문자만 필터링, 첫 글자 영문/언더스코어 보장
+            let safeName = item.name
+              .replace(/[^a-zA-Z0-9_.-]/g, '_') // 허용 문자만
+              .replace(/^[^a-zA-Z_]+/, '_') // 첫 글자 보정
+              .slice(0, 64); // 64자 제한
             return {
               type: 'function',
               function: {
-                name: item.name,
+                name: safeName,
                 description: item.description,
                 parameters: schema
               }
