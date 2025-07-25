@@ -36,15 +36,29 @@ if (process.env.ENABLE_ROUTER && process.env.ENABLE_ROUTER === 'true') {
       console.log('🔎 실제 API 호출 모델:', newData.model);
       console.log('🔎 원본 요청 모델:', data.model);
 
+      // 메시지에 이미지가 포함되어 있는지 확인
+      const hasImage = newData.messages?.some(
+        msg => Array.isArray(msg.content) && msg.content.some(part => part.type === 'image_url')
+      );
+
+      // 헤더 준비
+      const headers = {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${process.env.OPENAI_API_KEY}`,
+        'HTTP-Referer': 'https://claude-code-copilot-router.local',
+        'X-Title': 'Claude Code Copilot Router'
+      };
+
+      // 이미지가 포함된 경우 비전 헤더 추가
+      if (hasImage) {
+        headers['Copilot-Vision-Request'] = 'true';
+        console.log('🖼️ 비전 요청 헤더 추가됨');
+      }
+
       // OpenRouter API에 직접 HTTP 요청 (OpenAI SDK 헤더 문제 해결)
       const response = await fetch(process.env.OPENAI_BASE_URL + '/chat/completions', {
         method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          Authorization: `Bearer ${process.env.OPENAI_API_KEY}`,
-          'HTTP-Referer': 'https://claude-code-copilot-router.local',
-          'X-Title': 'Claude Code Copilot Router'
-        },
+        headers,
         body: JSON.stringify(newData)
       });
 
@@ -114,14 +128,82 @@ app.post('/v1/messages', async (req, res) => {
         return {
           role: item.role,
           content: item.content.map(it => {
+            // 디버깅: 받은 content 내용 확인
+            if (it?.type === 'image_url' || it?.type === 'image') {
+              console.log('🖼️ 이미지 데이터 구조:', JSON.stringify(it, null, 2));
+            }
+
+            // OpenRouter는 'text'와 'image_url' 타입만 지원
+            if (it?.type === 'image_url' || it?.type === 'image') {
+              // 이미지 URL 확인 - 다양한 형식 지원
+              let imageUrl = '';
+
+              // Claude의 다양한 이미지 형식 처리
+              if (it?.type === 'image' && it?.source) {
+                // Claude의 image 타입 처리
+                if (it.source.type === 'base64' && it.source.data) {
+                  // base64 데이터를 data URL로 변환
+                  const mediaType = it.source.media_type || 'image/png';
+                  imageUrl = `data:${mediaType};base64,${it.source.data}`;
+                } else if (it.source.data) {
+                  // 이미 data URL 형식인 경우
+                  imageUrl = it.source.data;
+                }
+              } else if (it?.image_url?.url) {
+                // image_url 타입
+                imageUrl = it.image_url.url;
+              } else if (it?.url) {
+                // 단순 url 속성
+                imageUrl = it.url;
+              }
+
+              console.log('🔗 추출된 이미지 URL:', imageUrl.substring(0, 100) + '...');
+
+              // 이미지 URL이 비어있는 경우
+              if (!imageUrl) {
+                console.log('❌ 이미지 URL을 찾을 수 없음');
+                return {
+                  type: 'text',
+                  text: '[이미지를 찾을 수 없습니다. 이미지가 제대로 업로드되었는지 확인해주세요.]'
+                };
+              }
+
+              // file:// 프로토콜은 로컬 파일이므로 OpenRouter에 전송 불가
+              if (imageUrl.startsWith('file://')) {
+                console.log('❌ 로컬 파일 이미지 감지');
+                return {
+                  type: 'text',
+                  text: '[로컬 이미지는 OpenRouter로 전송할 수 없습니다. 이미지를 base64로 인코딩하거나 외부 URL을 사용해주세요.]'
+                };
+              }
+
+              // data: URL이나 https: URL은 그대로 전달
+              if (imageUrl.startsWith('data:') || imageUrl.startsWith('http')) {
+                console.log('✅ 지원되는 이미지 형식 감지');
+                return {
+                  type: 'image_url',
+                  image_url: {
+                    url: imageUrl,
+                    detail: 'auto' // OpenRouter 권장 설정
+                  }
+                };
+              }
+
+              // 기타 형식의 이미지는 텍스트로 변환
+              console.log('⚠️ 지원하지 않는 이미지 형식');
+              return {
+                type: 'text',
+                text: '[지원하지 않는 이미지 형식입니다]'
+              };
+            }
+
+            // 이미지가 아닌 경우 기존 로직
             const msg = {
               ...it,
-              type: ['tool_result', 'tool_use'].includes(it?.type) ? 'text' : it?.type
+              type: 'text'
             };
-            if (msg.type === 'text') {
-              msg.text = it?.content ? JSON.stringify(it.content) : it?.text || '';
-              delete msg.content;
-            }
+            msg.text = it?.content ? JSON.stringify(it.content) : it?.text || '';
+            delete msg.content;
             return msg;
           })
         };
@@ -196,8 +278,17 @@ app.post('/v1/messages', async (req, res) => {
     console.dir(
       {
         model: data.model,
-        messages: data.messages,
-        tools: data.tools,
+        messages: data.messages.map(msg => ({
+          role: msg.role,
+          content: Array.isArray(msg.content)
+            ? msg.content.map(c => ({
+                type: c.type,
+                text: c.text ? c.text.substring(0, 50) + '...' : undefined,
+                image_url: c.image_url ? '이미지 URL 있음' : undefined
+              }))
+            : msg.content
+        })),
+        tools: data.tools?.length || 0,
         temperature: data.temperature,
         stream: data.stream
       },
